@@ -1,0 +1,23 @@
+# Template for local overrides. Compose merges docker-compose.override.yml
+# automatically; the real file is git-ignored.
+#
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+
+# Join an existing network so other containers reach the server as host "mssql".
+# Create it first: docker network create my-shared-network
+# networks:
+#   default:
+#     name: my-shared-network
+#     external: true
+
+# Fixed container names, if some script does `docker exec mssql ...`.
+# services:
+#   mssql:
+#     container_name: mssql
+#   restore-mssql:
+#     container_name: restore-mssql
+
+# Fixed volume name, to reuse a volume across projects.
+# volumes:
+#   mssql_data:
+#     name: my-mssql-data

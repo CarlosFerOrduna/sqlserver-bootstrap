@@ -1,0 +1,7 @@
+# Scripts run inside Linux containers — force LF so a Windows clone
+# (core.autocrlf=true) does not write CRLF into them.
+* text=auto eol=lf
+*.sh text eol=lf
+
+*.bak binary
+*.zip binary
