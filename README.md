@@ -79,6 +79,12 @@ the restore script both call `/opt/mssql-tools18/bin/sqlcmd`, which not every im
 (2019 images have `/opt/mssql-tools/bin/sqlcmd`, without the `18`). Check that path before
 switching tags.
 
+`restore-mssql` builds from `restore-mssql.Dockerfile` instead of using that image directly —
+it's the same pinned base, plus `unzip` installed at build time (as root, before the image
+drops to the non-root `mssql` user). That's needed to extract a `.bak` that's actually a ZIP
+in disguise (see below); the container itself can't `apt-get install` anything at runtime
+since it runs as `mssql`, not root.
+
 ## Edition and feature limits
 
 The image runs **Developer Edition** (engine edition 3, `16.0.4255.1`). It carries the full
@@ -116,10 +122,13 @@ enabling a table for CDC creates and starts `cdc.<db>_capture` and `cdc.<db>_cle
    `✅ Database ... already exists — skipping restore` and exits `0` without touching anything.
 2. Picks the **first** `*.bak` in `/var/opt/mssql/backup` (the `baks/` mount), one level deep
    only. With several backups present the choice is not deterministic — keep just one.
-3. Reads the logical file names out of the backup via `RESTORE FILELISTONLY`.
-4. Builds the `MOVE` clauses so the restored files land under `/var/opt/mssql/data/`:
+3. If the file's first bytes are the ZIP signature (`PK`) — i.e. someone dropped a `.zip` in
+   `baks/` and renamed it to `.bak` — extracts it with `unzip`, deletes the `.zip`, and
+   continues with the real `.bak` found inside.
+4. Reads the logical file names out of the backup via `RESTORE FILELISTONLY`.
+5. Builds the `MOVE` clauses so the restored files land under `/var/opt/mssql/data/`:
    `mdf`/`ndf` → `<LogicalName>.mdf`, `ldf` → `<LogicalName>_log.ldf`.
-5. Runs `RESTORE DATABASE [$DB_DATABASE] ... WITH <moves>, RECOVERY`.
+6. Runs `RESTORE DATABASE [$DB_DATABASE] ... WITH <moves>, RECOVERY`.
 
 ## Using it with other containers
 

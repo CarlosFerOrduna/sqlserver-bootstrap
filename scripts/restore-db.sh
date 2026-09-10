@@ -28,10 +28,40 @@ fi
 
 echo "📦 Using backup: $BAK_PATH"
 
+if head -c 2 "$BAK_PATH" | grep -q "PK"; then
+  echo "📦 '$BAK_PATH' looks like a ZIP archive — extracting it..."
+
+  if ! command -v unzip >/dev/null 2>&1; then
+    echo "❌ 'unzip' is not available in this image — extract '$BAK_PATH' manually and drop the real .bak in baks/."
+    exit 1
+  fi
+
+  BAK_DIR=$(dirname "$BAK_PATH")
+  ZIP_PATH="${BAK_PATH}.zip"
+  mv "$BAK_PATH" "$ZIP_PATH"
+  unzip -o -q "$ZIP_PATH" -d "$BAK_DIR"
+  rm -f "$ZIP_PATH"
+
+  BAK_PATH=$(find "$BAK_DIR" -type f -iname "*.bak" | head -n 1)
+  if [ -z "$BAK_PATH" ]; then
+    echo "❌ Extracted '$ZIP_PATH' but found no .bak file inside"
+    exit 1
+  fi
+
+  echo "📦 Using extracted backup: $BAK_PATH"
+fi
+
 echo "🔍 Reading FILELIST..."
-$SQLCMD -C -S mssql -U "$DB_USER" -P "$DB_PASS" -Q "
+$SQLCMD -C -S mssql -U "$DB_USER" -P "$DB_PASS" -h -1 -Q "
+SET NOCOUNT ON;
 RESTORE FILELISTONLY FROM DISK = N'$BAK_PATH'
 " -s"," -W > /tmp/filelist.txt
+
+if grep -q "^Msg " /tmp/filelist.txt; then
+  echo "❌ RESTORE FILELISTONLY failed — the .bak file is likely corrupt or incomplete:"
+  cat /tmp/filelist.txt
+  exit 1
+fi
 
 RESTORE_MOVES=""
 
@@ -52,12 +82,17 @@ while IFS=',' read -r LogicalName PhysicalName _; do
   esac
 
   RESTORE_MOVES+="MOVE N'$LogicalName' TO N'$path',"
-done < <(tail -n +3 /tmp/filelist.txt)
+done < /tmp/filelist.txt
 
 RESTORE_MOVES=${RESTORE_MOVES%,}
 
 echo "🧩 Generated MOVE clauses:"
 echo "$RESTORE_MOVES"
+
+if [ -z "$RESTORE_MOVES" ]; then
+  echo "❌ No MOVE clauses generated from FILELISTONLY — cannot restore"
+  exit 1
+fi
 
 echo "🚀 Restoring database '${DB_DATABASE}'..."
 
