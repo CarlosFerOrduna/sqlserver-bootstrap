@@ -1,0 +1,9 @@
+baks/
+*.bak
+*.trn
+*.zip
+*.7z
+*.gz
+.env
+.env.*
+!.env.example
