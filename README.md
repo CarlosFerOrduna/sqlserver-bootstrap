@@ -15,10 +15,20 @@ then hand-write a `MOVE` clause for every `.mdf`/`.ndf`/`.ldf` so the files land
 that exists inside the container. This stack does that for you, whatever the backup
 contains.
 
+### Why restore on `up`
+
+A `.bak` is a single static artifact: you drop it in once, and it's consumed once per
+volume. Restoring on `up` and skipping afterwards fits that. postgres-bootstrap does the
+opposite — it refreshes repeatedly from live sources — so there an on-demand
+`docker compose run` fits better.
+
 ## Requirements
 
 - Docker + Docker Compose
-- A SQL Server `.bak` file
+- A SQL Server `.bak` file, from the **same or an older** SQL Server version than the image.
+  SQL Server can't restore a backup taken on a newer version.
+- An amd64 host. The SQL Server image is amd64 only; on Apple Silicon it runs emulated
+  (enable Rosetta in Docker Desktop), which works but is slower.
 
 > Backups are **not** included in this repo, and `.bak` files are git-ignored on purpose:
 > they are typically hundreds of MB (GitHub rejects any file over 100 MB) and usually hold
@@ -29,7 +39,7 @@ contains.
 ```bash
 # 1. Configure
 cp .env.example .env
-#    edit .env and set DB_PASS (and DB_DATABASE, the name to restore as)
+#    edit .env and set MSSQL_SA_PASSWORD (and MSSQL_DATABASE, the name to restore as)
 
 # 2. Drop your backup in
 cp /path/to/your-backup.bak baks/
@@ -41,53 +51,76 @@ docker compose up -d
 docker compose logs -f restore-mssql   # wait for "✅ Restore complete"
 ```
 
-Then connect from the host:
+Then connect from the host. `sqlcmd` reads the password from `SQLCMDPASSWORD`, so it never
+goes on the command line:
 
 ```bash
-sqlcmd -C -S localhost,1433 -U sa -P "<DB_PASS>" -Q "SELECT name FROM sys.databases"
+# bash
+export SQLCMDPASSWORD='<MSSQL_SA_PASSWORD>'
+sqlcmd -C -S localhost,1433 -U sa -Q "SELECT name FROM sys.databases"
+```
+
+```powershell
+# PowerShell
+$env:SQLCMDPASSWORD = '<MSSQL_SA_PASSWORD>'
+sqlcmd -C -S localhost,1433 -U sa -Q "SELECT name FROM sys.databases"
+```
+
+Inside the container `SQLCMDPASSWORD` is already set, so `docker compose exec` needs nothing:
+
+```bash
+docker compose exec mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -Q "SELECT @@VERSION"
 ```
 
 ## Configuration
 
-All settings live in `.env`:
+All settings live in `.env`. Server settings use the image's own `MSSQL_` prefix; restore
+settings have none.
 
-| Variable      | Default | Purpose                                                         |
-| ------------- | ------- | --------------------------------------------------------------- |
-| `DB_USER`     | `sa`    | Admin user. The image only supports `sa` for initial bootstrap. |
-| `DB_PASS`     | —       | `sa` password. **Must** meet SQL Server's policy (see below).   |
-| `DB_DATABASE` | `mydb`  | Name to restore the backup as.                                  |
-| `DB_PORT`     | `1433`  | Host port to publish. Change if `1433` is taken.                |
+| Variable            | Default       | Purpose                                                              |
+| ------------------- | ------------- | -------------------------------------------------------------------- |
+| `MSSQL_SA_PASSWORD` | —             | `sa` password. **Must** meet SQL Server's policy (see below).        |
+| `MSSQL_IMAGE`       | see below     | Image for `mssql` and `restore-mssql`.                               |
+| `MSSQL_PORT`        | `1433`        | Host port to publish (not `MSSQL_TCP_PORT`, the in-container port).  |
+| `MSSQL_DATABASE`    | —             | Name to restore the backup as.                                       |
+| `BAK_FILE`          | —             | File name inside `baks/`. Required when there's more than one.       |
+| `BAK_FILE_POSITION` | —             | Backup set (`FILE = n`). Required when the file holds more than one. |
+| `DB_USER_LOGINS`    | —             | `user:login,user:login` — remap restored users to existing logins.   |
 
-`DB_PASS` becomes the `sa` password, so SQL Server enforces its policy on it: at least
-8 characters, using 3 of these 4 groups — uppercase, lowercase, digits, symbols. The value
-in `.env.example` satisfies the policy but is a placeholder; change it.
+The admin user is always `sa`.
 
-The database is restored under the name in **`DB_DATABASE`**, not the name it had inside the
-backup. A `sales_prod_20240101.bak` will come up as `mydb` unless you say otherwise.
+`MSSQL_SA_PASSWORD` becomes the `sa` password, so SQL Server enforces its policy on it: at
+least 8 characters, using 3 of these 4 groups — uppercase, lowercase, digits, symbols. The
+value in `.env.example` satisfies the policy but is a placeholder; change it.
+
+The database is restored under the name in **`MSSQL_DATABASE`**, not the name it had inside
+the backup. A `sales_prod_20240101.bak` will come up as `mydb` unless you say otherwise.
 
 ## Services
 
-| Service         | Purpose                                                                 |
-| --------------- | ----------------------------------------------------------------------- |
-| `mssql`         | The SQL Server instance. Data persists in the `mssql_data` volume.      |
-| `restore-mssql` | One-shot restore of the first `.bak` found in `baks/`, then exits.      |
+| Service         | Purpose                                                            |
+| --------------- | ------------------------------------------------------------------ |
+| `mssql`         | The SQL Server instance. Data persists in the `mssql_data` volume. |
+| `restore-mssql` | One-shot restore of the backup in `baks/`, then exits.             |
 
 `restore-mssql` waits for `mssql` to pass its healthcheck before running, and does not restart.
 
-Both are pinned to `mcr.microsoft.com/mssql/server:2022-latest` on purpose: the healthcheck and
-the restore script both call `/opt/mssql-tools18/bin/sqlcmd`, which not every image ships
-(2019 images have `/opt/mssql-tools/bin/sqlcmd`, without the `18`). Check that path before
-switching tags.
+Both use `MSSQL_IMAGE`, which defaults to `mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04`
+(`@@VERSION` 16.0.4305.5). It's a fixed CU tag rather than `2022-latest`, so a pull never
+changes the server version under you. Bump it on purpose, and never below the version a
+volume was last started with. The healthcheck and the restore script both call
+`/opt/mssql-tools18/bin/sqlcmd`, which not every image ships (2019 images have
+`/opt/mssql-tools/bin/sqlcmd`, without the `18`), so check that path before switching tags.
 
 `restore-mssql` builds from `restore-mssql.Dockerfile` instead of using that image directly —
-it's the same pinned base, plus `unzip` installed at build time (as root, before the image
-drops to the non-root `mssql` user). That's needed to extract a `.bak` that's actually a ZIP
-in disguise (see below); the container itself can't `apt-get install` anything at runtime
-since it runs as `mssql`, not root.
+it's the same base, plus `unzip` installed at build time (as root, before the image drops to
+the non-root `mssql` user). That's needed to extract a `.bak` that's actually a ZIP (see
+below); the container itself can't `apt-get install` anything at runtime since it runs as
+`mssql`, not root.
 
 ## Edition and feature limits
 
-The image runs **Developer Edition** (engine edition 3, `16.0.4255.1`). It carries the full
+The image runs **Developer Edition** (engine edition 3, `16.0.4305.5`). It carries the full
 Enterprise feature set, but it is **licensed for development and test only — not production**.
 `MSSQL_PID` selects a different edition (`Express`, `Standard`, `Enterprise`).
 
@@ -118,23 +151,56 @@ enabling a table for CDC creates and starts `cdc.<db>_capture` and `cdc.<db>_cle
 `scripts/restore-db.sh` runs inside `restore-mssql`, and is safe to run on every
 `docker compose up`:
 
-1. Checks `sys.databases` for `$DB_DATABASE`. If it already exists, logs
-   `✅ Database ... already exists — skipping restore` and exits `0` without touching anything.
-2. Picks the **first** `*.bak` in `/var/opt/mssql/backup` (the `baks/` mount), one level deep
-   only. With several backups present the choice is not deterministic — keep just one.
-3. If the file's first bytes are the ZIP signature (`PK`) — i.e. someone dropped a `.zip` in
-   `baks/` and renamed it to `.bak` — extracts it with `unzip`, deletes the `.zip`, and
-   continues with the real `.bak` found inside.
-4. Reads the logical file names out of the backup via `RESTORE FILELISTONLY`.
-5. Builds the `MOVE` clauses so the restored files land under `/var/opt/mssql/data/`:
-   `mdf`/`ndf` → `<LogicalName>.mdf`, `ldf` → `<LogicalName>_log.ldf`.
-6. Runs `RESTORE DATABASE [$DB_DATABASE] ... WITH <moves>, RECOVERY`.
+1. Looks up the state of `$MSSQL_DATABASE` in `sys.databases`:
+   - **ONLINE** — logs `✅ ... already ONLINE — skipping restore` and exits `0` without
+     touching anything.
+   - **RECOVERING** — normal right after a server restart; waits up to 5 minutes for it
+     to settle.
+   - **Any other state** (e.g. `RESTORING` left by an interrupted restore) — logs a `⚠️`
+     with the state, drops the database, and restores it again.
+   - **Missing** — restores it.
+2. Picks the backup in `/var/opt/mssql/backup` (the `baks/` mount), one level deep: the file
+   named by `BAK_FILE`, or else the only `*.bak`/`*.zip` there. With several candidates and
+   no `BAK_FILE`, it fails and lists them.
+3. If the file starts with the ZIP signature (`PK`), whatever its extension, extracts its
+   single `.bak` entry to `/var/opt/mssql/restore-scratch` on the data volume — a path the
+   `mssql` server process can read. The file in `baks/` is never modified, and the scratch
+   directory is deleted when the script exits.
+4. Lists the backup sets with `RESTORE HEADERONLY`. With more than one and no
+   `BAK_FILE_POSITION`, it fails and lists Position / BackupType / DatabaseName /
+   BackupFinishDate.
+5. Reads the files of that set via `RESTORE FILELISTONLY` and builds a `MOVE` clause for each
+   under `/var/opt/mssql/data/`, prefixed with the database name so two restores never
+   collide:
+   - data → `<db>_<LogicalName>.mdf` (`.ndf` unless the original was `.mdf`)
+   - log → `<db>_<LogicalName>.ldf`
+   - FileStream / In-Memory OLTP container → directory `<db>_<LogicalName>`, with a warning:
+     In-Memory OLTP restores fine, FileStream doesn't (it's off in this image)
+   - Full-Text catalog → fails upfront (Full-Text isn't installed)
+6. Runs `RESTORE DATABASE [$MSSQL_DATABASE] ... WITH FILE = n, <moves>, STATS = 10, RECOVERY`,
+   logging progress every 10%.
+7. Remaps each `DB_USER_LOGINS` pair with `ALTER USER ... WITH LOGIN = ...` when the login
+   exists, then lists the remaining orphaned users — SQL and Windows users whose SID matches no
+   login on this server. Problems here only warn: the database is already restored.
+
+All names are escaped before they go into T-SQL, so database, logical and file names with
+quotes or brackets are safe.
+
+## Safety
+
+- The files in `baks/` are never renamed, modified or deleted; ZIPs are extracted to a
+  scratch directory that's removed on exit.
+- The password is never on a command line: `SQLCMDPASSWORD` carries it for the healthcheck,
+  the restore script and `docker compose exec`, and it is never logged.
+- An ONLINE database is never touched. Only a database stuck in a non-ONLINE state is dropped
+  and restored again.
+- User remapping only targets logins that already exist; the script never creates logins.
 
 ## Using it with other containers
 
 By default the stack creates its own network and the server is reachable from the host at
-`localhost:${DB_PORT}`. If you have other containers — an API, a worker — that should reach
-it by hostname instead, join them on a shared external network:
+`localhost:${MSSQL_PORT}`. If you have other containers — an API, a worker — that should
+reach it by hostname instead, join them on a shared external network:
 
 ```bash
 cp docker-compose.override.yml.example docker-compose.override.yml
@@ -149,20 +215,45 @@ repo. The example file also covers pinning container names and the volume name.
 
 ## Troubleshooting
 
-**`mssql` starts and immediately exits.** Almost always a `DB_PASS` that fails SQL Server's
-password policy. The error only shows up in the container log:
+**`mssql` starts and immediately exits.** Almost always a `MSSQL_SA_PASSWORD` that fails SQL
+Server's password policy. The error only shows up in the container log:
 
 ```bash
 docker compose logs mssql   # look for "Unable to set system administrator password"
 ```
 
-**`❌ No .bak file found`.** `baks/` is empty, or the backup is in a subdirectory.
-The script only looks one level deep — move the file directly into `baks/`.
+**`❌ No .bak or .zip file found in baks/`.** `baks/` is empty, or the backup is in a
+subdirectory. The script only looks one level deep — move the file directly into `baks/`.
 
-**Force a re-restore.** The script skips when the database already exists, so drop it first:
+**`❌ Found N backups in baks/`.** Set `BAK_FILE` in `.env` to the file name to restore, or
+keep just one backup in `baks/`.
+
+**`❌ The backup holds N backup sets`.** The file has several backups appended to it. Pick one
+from the listed positions with `BAK_FILE_POSITION` — usually the latest full backup
+(`BackupType` `1`).
+
+**`⚠️ Database ... is RESTORING, not ONLINE`.** A previous restore was interrupted, or the
+database was restored `WITH NORECOVERY`. The script drops it and restores again on its own.
+
+**`⚠️ Orphaned users`.** The backup's database users point to logins (by SID) that don't
+exist on this server. Create the login and map the user:
+
+```sql
+CREATE LOGIN [app_login] WITH PASSWORD = N'...';
+USE [mydb];
+ALTER USER [app_user] WITH LOGIN = [app_login];
+```
+
+Add `DB_USER_LOGINS=app_user:app_login` to `.env` so future restores map it automatically.
+
+**`The database was backed up on a server running version ...`.** The backup comes from a
+newer SQL Server than `MSSQL_IMAGE`. Point `MSSQL_IMAGE` at a matching or newer version —
+SQL Server can't restore backups from newer versions.
+
+**Force a re-restore.** The script skips when the database is ONLINE, so drop it first:
 
 ```bash
-docker compose exec mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "<DB_PASS>" \
+docker compose exec mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa \
   -Q "ALTER DATABASE [mydb] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [mydb];"
 docker compose up -d restore-mssql
 ```
@@ -173,3 +264,7 @@ docker compose up -d restore-mssql
 docker compose down -v
 docker compose up -d
 ```
+
+## License
+
+[MIT](LICENSE)

@@ -1,7 +1,7 @@
 services:
   mssql:
-    # Pinned: healthcheck and restore-db.sh need /opt/mssql-tools18/bin/sqlcmd.
-    image: mcr.microsoft.com/mssql/server:2022-latest
+    # The healthcheck and restore-db.sh need /opt/mssql-tools18/bin/sqlcmd — check it before switching tags.
+    image: ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04}
     restart: unless-stopped
     env_file:
       - .env
@@ -9,12 +9,13 @@ services:
       - ./baks:/var/opt/mssql/backup
       - mssql_data:/var/opt/mssql
     environment:
-      MSSQL_SA_PASSWORD: "${DB_PASS}"
       ACCEPT_EULA: "Y"
+      # sqlcmd reads it, so the password never goes on a command line
+      SQLCMDPASSWORD: "${MSSQL_SA_PASSWORD}"
     ports:
-      - "${DB_PORT:-1433}:1433"
+      - "${MSSQL_PORT:-1433}:1433"
     healthcheck:
-      test: /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U "${DB_USER}" -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1" || exit 1
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -Q 'SELECT 1' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -24,12 +25,18 @@ services:
     build:
       context: .
       dockerfile: restore-mssql.Dockerfile
+      args:
+        MSSQL_IMAGE: ${MSSQL_IMAGE:-mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04}
     depends_on:
       mssql:
         condition: service_healthy
     env_file:
       - .env
+    environment:
+      SQLCMDPASSWORD: "${MSSQL_SA_PASSWORD}"
     volumes:
+      # Shared with mssql: a ZIP is extracted here so the server can read the .bak
+      - mssql_data:/var/opt/mssql
       - ./baks:/var/opt/mssql/backup
       - ./scripts/restore-db.sh:/restore-db.sh:ro
     command: ["bash", "/restore-db.sh"]
