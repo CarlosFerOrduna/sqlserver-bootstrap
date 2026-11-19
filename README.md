@@ -72,6 +72,15 @@ Inside the container `SQLCMDPASSWORD` is already set, so `docker compose exec` n
 docker compose exec mssql /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -Q "SELECT @@VERSION"
 ```
 
+From an IDE (DataGrip, Rider, SSMS, Azure Data Studio), force TCP over IPv4:
+
+```text
+Server=tcp:127.0.0.1,1433;TrustServerCertificate=True
+```
+
+A bare `Server=localhost` may try `::1` first, then fall back to Named Pipes, which the
+container doesn't expose — that surfaces as error 40 ("Named Pipes Provider").
+
 ## Configuration
 
 All settings live in `.env`. Server settings use the image's own `MSSQL_` prefix; restore
